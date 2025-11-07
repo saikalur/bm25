@@ -1,0 +1,22 @@
+# Python virtual environments and caches
+venv/
+__pycache__/
+*.py[cod]
+
+# Local logs and databases
+log/
+
+# Environment and API keys
+.env
+openai_config.json
+twilio_config.json
+
+# Node.js build artifacts
+ui/node_modules/
+ui/dist/
+
+# OS junk
+.DS_Store
+
+# Personal Files
+Prezos/

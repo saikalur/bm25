@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""
+Vapi Webhook Controller - Self-sufficient Python script
+Handles Vapi webhooks, logs calls, and sends SMS notifications via Twilio
+"""
+
+import json
+import os
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, Optional
+import sqlite3
+
+from flask import Flask, request, jsonify
+from twilio.rest import Client as TwilioClient
+from pytz import timezone
+
+# Configuration
+LOG_DIR = Path("log")
+LOG_FILE = LOG_DIR / "call_logs.json"
+DEBUG_LOG = LOG_DIR / "vapi_debug.log"
+DB_FILE = LOG_DIR / "calls.db"
+
+# Create log directory if it doesn't exist
+LOG_DIR.mkdir(exist_ok=True)
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(DEBUG_LOG),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Flask app
+app = Flask(__name__)
+
+# Initialize database
+def init_database():
+    """Initialize SQLite database for call logs"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ai_free_phone_call_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT,
+            call_type TEXT,
+            recording_url TEXT,
+            status TEXT,
+            req_host TEXT,
+            inbound_info_message_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Initialize on startup
+init_database()
+
+
+def load_logs() -> list:
+    """Load call logs from JSON file"""
+    try:
+        if LOG_FILE.exists():
+            with open(LOG_FILE, 'r') as f:
+                return json.load(f)
+        return []
+    except Exception as e:
+        logger.error(f"Error loading logs: {e}")
+        return []
+
+
+def save_logs(logs: list):
+    """Save call logs to JSON file"""
+    try:
+        with open(LOG_FILE, 'w') as f:
+            json.dump(logs, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving logs: {e}")
+
+
+def get_twilio_config() -> tuple:
+    """
+    Get Twilio configuration from twilio_config.json file (primary) or environment variables (fallback).
+    Returns: (account_sid, auth_token, phone_number)
+    """
+    account_sid = ''
+    auth_token = ''
+    phone_number = ''
+    
+    # Try loading from config file first
+    config_file = Path('twilio_config.json')
+    if config_file.exists():
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                account_sid = config.get('account_sid', '')
+                auth_token = config.get('auth_token', '')
+                phone_number = config.get('phone_number', '')
+                logger.info("Loaded Twilio configuration from twilio_config.json")
+        except Exception as e:
+            logger.error(f"Error loading Twilio config from file: {e}")
+    
+    # Fall back to environment variables if config file values are missing
+    if not account_sid:
+        account_sid = os.getenv('TWILIO_ACCOUNT_SID', '')
+    if not auth_token:
+        auth_token = os.getenv('TWILIO_AUTH_TOKEN', '')
+    if not phone_number:
+        phone_number = os.getenv('TWILIO_PHONE_NUMBER', '')
+    
+    return account_sid, auth_token, phone_number
+
+
+def send_twilio_sms(to_number: str, message: str) -> bool:
+    """Send SMS via Twilio"""
+    try:
+        account_sid, auth_token, from_number = get_twilio_config()
+        
+        if not all([account_sid, auth_token, from_number]):
+            logger.error("Twilio configuration incomplete. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER environment variables.")
+            return False
+        
+        client = TwilioClient(account_sid, auth_token)
+        client.messages.create(
+            body=message,
+            from_=from_number,
+            to=to_number
+        )
+        logger.info(f"SMS sent successfully to {to_number}")
+        return True
+    except Exception as e:
+        logger.error(f"Twilio error: {e}")
+        return False
+
+
+def store_call_in_db(phone_number: str, call_type: str, recording_url: str, 
+                     status: str, req_host: str) -> Optional[int]:
+    """Store call information in database. Returns the call log ID."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO ai_free_phone_call_logs 
+            (phone_number, call_type, recording_url, status, req_host)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (phone_number, call_type, recording_url, status, req_host))
+        call_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return call_id
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        return None
+
+
+def update_call_message_sent(call_id: int):
+    """Update the call log with the message sent timestamp"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE ai_free_phone_call_logs 
+            SET inbound_info_message_at = ?
+            WHERE id = ?
+        ''', (datetime.now().isoformat(), call_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Database update error: {e}")
+
+
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint with API information"""
+    return jsonify({
+        'service': 'Vapi Webhook Controller',
+        'status': 'running',
+        'endpoints': {
+            'POST /webhook': 'Receive Vapi webhook events',
+            'GET /logs': 'Get all call logs (JSON)',
+            'GET /logs/view': 'View logs in HTML format',
+            'GET /status': 'Get server status'
+        }
+    })
+
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle Vapi webhook requests"""
+    logger.info("=== Received webhook request ===")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
+    try:
+        payload = request.get_json()
+        if not payload:
+            return jsonify({'error': 'Invalid JSON'}), 400
+        
+        print("-------payload---------")
+        event_type = payload.get('message', {}).get('type') or payload.get('type')
+        print(f"Event type: {event_type}")
+        print("---------------")
+        print("********************************************************")
+        logger.info(f"Event type: {event_type}")
+        print("********************************************************")
+        
+        # Create log entry
+        chicago_tz = timezone('America/Chicago')
+        timestamp = datetime.now(chicago_tz).strftime('%Y-%m-%d %I:%M:%S %p %Z')
+        
+        log_entry = {
+            'timestamp': timestamp,
+            'event_type': event_type,
+            'data': payload,
+            'ip': request.remote_ip
+        }
+        
+        # Save to logs
+        call_logs = load_logs()
+        call_logs.append(log_entry)
+        save_logs(call_logs)
+        
+        # Handle end-of-call-report
+        if event_type == 'end-of-call-report':
+            call_data = payload.get('message', {})
+            
+            # Store in database
+            phone_number = call_data.get('customer', {}).get('number', '')
+            recording_url = call_data.get('recordingUrl', '')
+            status = call_data.get('status', 'completed')
+            req_host = request.host
+            
+            call_id = store_call_in_db(
+                phone_number=phone_number,
+                call_type='Inbound',
+                recording_url=recording_url,
+                status=status,
+                req_host=req_host
+            )
+            
+            if call_id:
+                try:
+                    host = os.getenv('HOST', f"http://{req_host}")
+                    message = (
+                        f"Thank you for talking with me. "
+                        f"Please fill in your details here: {host}/inbound_call/{call_id}/detail\n\n"
+                        f"Cheers,\nBakerMatcher"
+                    )
+                    
+                    # Send SMS
+                    if send_twilio_sms(phone_number, message):
+                        update_call_message_sent(call_id)
+                    
+                except Exception as e:
+                    logger.error(f"Error sending SMS: {e}")
+                
+                logger.info(f"Stored end-of-call-report in database for call_id={call_data.get('callId')}")
+        
+        # Handle call.received event
+        if event_type == 'call.received':
+            return jsonify({
+                'assistantId': 'c2eb2fbf-23fa-4a9c-a6cc-0fcae52b3faa'
+            })
+        else:
+            return jsonify({'status': 'processed'})
+            
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/logs', methods=['GET'])
+def logs():
+    """Get all call logs"""
+    return jsonify(load_logs())
+
+
+@app.route('/logs/view', methods=['GET'])
+def logs_view():
+    """View logs in HTML format"""
+    logs = load_logs()
+    logs.reverse()
+    
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Vapi Call Logs</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            pre { max-width: 500px; overflow-x: auto; }
+        </style>
+    </head>
+    <body>
+        <h1>Vapi Call Logs</h1>
+        <table>
+            <tr>
+                <th>Timestamp</th>
+                <th>Event Type</th>
+                <th>IP Address</th>
+                <th>Data</th>
+            </tr>
+    """
+    
+    for log in logs:
+        html += f"""
+            <tr>
+                <td>{log.get('timestamp', 'N/A')}</td>
+                <td>{log.get('event_type', 'N/A')}</td>
+                <td>{log.get('ip', 'N/A')}</td>
+                <td><pre>{json.dumps(log.get('data', {}), indent=2)}</pre></td>
+            </tr>
+        """
+    
+    html += """
+        </table>
+    </body>
+    </html>
+    """
+    
+    return html
+
+
+@app.route('/status', methods=['GET'])
+def status():
+    """Get server status"""
+    logs = load_logs()
+    chicago_tz = timezone('America/Chicago')
+    server_time = datetime.now(chicago_tz).isoformat()
+    
+    return jsonify({
+        'status': 'running',
+        'total_calls': len(logs),
+        'last_call': logs[-1] if logs else None,
+        'server_time': server_time
+    })
+
+
+if __name__ == '__main__':
+    print("Starting Vapi Webhook Controller...")
+    print(f"Log directory: {LOG_DIR.absolute()}")
+    print(f"Database: {DB_FILE.absolute()}")
+    print("\nAvailable endpoints:")
+    print("  POST /webhook - Receive Vapi webhooks")
+    print("  GET  /logs - Get all logs (JSON)")
+    print("  GET  /logs/view - View logs (HTML)")
+    print("  GET  /status - Get server status")
+    print("\nConfiguration:")
+    print("  HOST - Your application host URL (default: http://localhost:5000)")
+    print("  Twilio config: Loaded from twilio_config.json (or environment variables as fallback)")
+    print("\nStarting server on http://localhost:5000\n")
+    
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
