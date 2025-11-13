@@ -571,7 +571,7 @@ function App() {
             <h1>BakerMatcher Personality Analysis</h1>
             <p>
               Watch the featured video, share your thoughts, and let {ASSISTANT_NAME} surface how your
-              perspective shapes your financial mindset.
+              perspective shapes your mindset.
             </p>
           </div>
         </div>
@@ -630,7 +630,7 @@ function App() {
       </main>
 
       <footer className="footer">
-        {ASSISTANT_NAME} · Finance reflections powered by OpenAI
+        {ASSISTANT_NAME} · Personality reflections
       </footer>
     </div>
   );
