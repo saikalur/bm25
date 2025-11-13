@@ -235,18 +235,14 @@ async def create_realtime_session(api_key: str, prompts: dict):
                 frames_per_buffer=CHUNK
             )
             
-            # Wait a moment for session to be ready, then trigger first sentence
-            await asyncio.sleep(1.0)
+            # Wait for user to start speaking before AI speaks
+            # The first sentence will be triggered naturally when user speaks
+            logger.info("Session ready. Waiting for user to start speaking...")
+            print("\nSession ready. Start speaking when you're ready!")
+            print("(The AI will greet you after you speak first)\n")
             
-            # Trigger the first sentence by creating an empty response
-            # The session instructions will tell it what to say
-            if first_sentence:
-                logger.info(f"First sentence configured: {first_sentence}")
-                print(f"BM25: {first_sentence}\n")
-                # Create a response - the system instructions will make it say the first sentence
-                await session.send({
-                    "type": "response.create"
-                })
+            # Track if this is the first user interaction
+            first_user_interaction = True
             
             async def send_audio():
                 """Send audio from microphone to OpenAI"""
@@ -269,6 +265,8 @@ async def create_realtime_session(api_key: str, prompts: dict):
                 """Receive events from OpenAI and handle them"""
                 # Track current response ID for interruption
                 current_response_id = None
+                # Track if this is the first user interaction
+                nonlocal first_user_interaction
                 
                 try:
                     async for event in session:
@@ -357,6 +355,9 @@ async def create_realtime_session(api_key: str, prompts: dict):
                             
                             # Ignore the "buffer too small" error - server VAD handles commits automatically
                             if error_code == "input_audio_buffer_commit_empty":
+                                logger.debug(f"Ignoring expected error: {error_msg}")
+                            # Ignore "response cancel not active" - happens when trying to cancel a response that already finished
+                            elif error_code == "response_cancel_not_active":
                                 logger.debug(f"Ignoring expected error: {error_msg}")
                             else:
                                 logger.error(f"API error: {error_msg}")

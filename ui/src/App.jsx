@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000';
+// Use relative URL if on same domain, otherwise use environment variable or default
+const getApiBaseUrl = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  // If accessed via HTTPS, use relative URL (nginx will proxy)
+  if (window.location.protocol === 'https:') {
+    return ''; // Relative URL - same domain
+  }
+  // For local development
+  return 'http://localhost:5000';
+};
+
+const API_BASE_URL = getApiBaseUrl();
 const VIDEO_URL = 'https://youtu.be/dyaG7zEtJ7U';
 const ASSISTANT_NAME = 'BakerMatcher';
 const DEFAULT_FIRST_SENTENCE = "Hi! I'm Baker Matcher, and I'm here to chat with you about the videos you've watched a few minutes ago. What did you watch today, or what's on your mind? Let us have an open interactive conversation. Speak whatever is on your mind and I will patiently listen and engage with you";
@@ -17,43 +30,64 @@ function Message({ role, content }) {
   );
 }
 
-function AnalysisCard({ analysis }) {
-  if (!analysis) return null;
+function AnalysisDisplay({ analysis, isAnalyzing }) {
+  const formatAnalysis = (analysis) => {
+    if (!analysis) return '';
 
-  const keyInsights = Array.isArray(analysis.keyInsights) ? analysis.keyInsights : [];
-  const nextSteps = Array.isArray(analysis.nextSteps) ? analysis.nextSteps : [];
+    const keyInsights = Array.isArray(analysis.keyInsights) ? analysis.keyInsights : [];
+    const nextSteps = Array.isArray(analysis.nextSteps) ? analysis.nextSteps : [];
+    
+    let text = '=== Finance Reflection ===\n\n';
+    
+    if (analysis.summary) {
+      text += `Summary:\n${analysis.summary}\n\n`;
+    }
+    
+    if (analysis.sentiment) {
+      text += `Sentiment: ${analysis.sentiment}\n\n`;
+    }
+    
+    if (keyInsights.length > 0) {
+      text += 'Key Insights:\n';
+      keyInsights.forEach((item, index) => {
+        text += `  ${index + 1}. ${item}\n`;
+      });
+      text += '\n';
+    }
+    
+    if (nextSteps.length > 0) {
+      text += 'Next Steps:\n';
+      nextSteps.forEach((item, index) => {
+        text += `  ${index + 1}. ${item}\n`;
+      });
+    }
+    
+    return text.trim();
+  };
 
   return (
-    <section className="analysis-card" aria-live="polite">
-      <h3>Finance Reflection</h3>
-      <p className="analysis-summary">{analysis.summary}</p>
-      <div className="analysis-columns">
-        <div>
-          <strong>Sentiment</strong>
-          <p className="analysis-tag">{analysis.sentiment ?? 'neutral'}</p>
+    <div className="analysis-display">
+      <label htmlFor="analysis-textarea" className="analysis-label">
+        Conversation Analysis
+      </label>
+      {isAnalyzing ? (
+        <div className="analysis-loading">
+          <div className="progress-bar">
+            <div className="progress-bar-fill"></div>
+          </div>
+          <p className="analysis-loading-text">Analyzing your conversation...</p>
         </div>
-        {keyInsights.length > 0 && (
-          <div>
-            <strong>Key Insights</strong>
-            <ul>
-              {keyInsights.map((item, index) => (
-                <li key={`insight-${index}`}>{item}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {nextSteps.length > 0 && (
-          <div>
-            <strong>Next Steps</strong>
-            <ul>
-              {nextSteps.map((item, index) => (
-                <li key={`step-${index}`}>{item}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-    </section>
+      ) : (
+        <textarea
+          id="analysis-textarea"
+          className="analysis-textarea"
+          value={formatAnalysis(analysis)}
+          readOnly
+          placeholder={analysis ? '' : 'Analysis will appear here after you stop the conversation...'}
+          aria-label="Conversation analysis"
+        />
+      )}
+    </div>
   );
 }
 
@@ -88,15 +122,51 @@ function App() {
     return VIDEO_URL;
   }, []);
 
-  const hasUserMessages =
-    messages.some((message) => message.role === 'user') ||
-    messagesRef.current.some((message) => message.role === 'user');
+  const hasUserMessages = useMemo(() => {
+    if (messages.some((message) => message.role === 'user')) {
+      return true;
+    }
+    messagesRef.current = messages;
+    return messagesRef.current.some((message) => message.role === 'user');
+  }, [messages]);
 
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
-  const stopRealtime = useCallback(() => {
+  const handleAnalyze = useCallback(async () => {
+    const userMessages = messagesRef.current.filter((m) => m.role === 'user');
+    
+    if (userMessages.length === 0 || isAnalyzing || isConnecting) {
+      return;
+    }
+    
+    setIsAnalyzing(true);
+    setError(null);
+    setAnalysis(null); // Clear previous analysis
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: messagesRef.current })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Unable to analyze the conversation right now.');
+      }
+
+      const data = await response.json();
+      setAnalysis(data.analysis ?? null);
+    } catch (err) {
+      console.error(err);
+      setError(err.message ?? 'Something went wrong.');
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [API_BASE_URL, isAnalyzing, isConnecting]);
+
+  const stopRealtimeWithAnalysis = useCallback(async (currentMessagesState = null) => {
     setIsConnecting(false);
     setIsConnected(false);
     assistantBufferRef.current = '';
@@ -133,14 +203,56 @@ function App() {
       remoteAudioRef.current.pause();
       remoteAudioRef.current.srcObject = null;
     }
-  }, []);
 
-  useEffect(() => stopRealtime, [stopRealtime]);
+    // Wait a moment for state to settle, then check messages
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    // Try to get messages from state first, then fall back to ref
+    const messagesToCheck = currentMessagesState || messagesRef.current;
+    const userMessages = messagesToCheck.filter((m) => m.role === 'user');
+    
+    if (userMessages.length > 0 && !isAnalyzing) {
+      // Trigger analysis automatically
+      await handleAnalyze();
+    }
+  }, [handleAnalyze, isAnalyzing]);
 
   const handleRealtimeEvent = useCallback((event) => {
     if (!event || !event.type) {
       return;
     }
+
+    const extractText = (item) => {
+      if (!item) {
+        return '';
+      }
+      
+      // Try different possible structures
+      if (Array.isArray(item.content)) {
+        const text = item.content
+          .filter((part) => part?.type === 'text' || part?.type === 'input_text' || part?.type === 'output_text')
+          .map((part) => part.text || part.input_text || part.output_text || '')
+          .join('')
+          .trim();
+        return text;
+      }
+      
+      // Try direct text property
+      if (item.text) {
+        return item.text.trim();
+      }
+      
+      // Try input_text or output_text
+      if (item.input_text) {
+        return item.input_text.trim();
+      }
+      
+      if (item.output_text) {
+        return item.output_text.trim();
+      }
+      
+      return '';
+    };
 
     switch (event.type) {
       case 'response.output_text.delta': {
@@ -171,18 +283,61 @@ function App() {
       }
       case 'conversation.item.completed': {
         const item = event.item;
-        if (item?.type === 'message' && item.role === 'assistant') {
-          const textParts = [];
-          (item.content || []).forEach((part) => {
-            if (part.type === 'output_text' && part.text) {
-              textParts.push(part.text);
+        
+        if (item?.type === 'message') {
+          let text = '';
+          
+          // For user messages, look for transcript in input_audio
+          if (item.role === 'user') {
+            (item.content || []).forEach((part) => {
+              if (part.type === 'input_audio' && part.transcript) {
+                text = part.transcript;
+              }
+              if (part.type === 'input_text' && part.text) {
+                text = part.text;
+              }
+            });
+            
+            if (text) {
+              setMessages((prev) => [...prev, { role: 'user', content: text }]);
             }
-          });
-          const text = textParts.join('').trim();
+          }
+          
+          // For assistant messages, look for output_text
+          if (item.role === 'assistant') {
+            const textParts = [];
+            (item.content || []).forEach((part) => {
+              if (part.type === 'output_text' && part.text) {
+                textParts.push(part.text);
+              }
+              if (part.type === 'text' && part.text) {
+                textParts.push(part.text);
+              }
+            });
+            text = textParts.join('').trim();
+            
+            if (text) {
+              setMessages((prev) => [...prev, { role: 'assistant', content: text }]);
+              assistantBufferRef.current = '';
+              setLiveAssistantText('');
+            }
+          }
+        }
+        break;
+      }
+      case 'conversation.item.created': {
+        const item = event.item;
+        
+        if (item?.type === 'message') {
+          const text = extractText(item);
+          
           if (text) {
-            setMessages((prev) => [...prev, { role: 'assistant', content: text }]);
-            assistantBufferRef.current = '';
-            setLiveAssistantText('');
+            if (item.role === 'assistant') {
+              setMessages((prev) => [...prev, { role: 'assistant', content: text }]);
+            }
+            if (item.role === 'user') {
+              setMessages((prev) => [...prev, { role: 'user', content: text }]);
+            }
           }
         }
         break;
@@ -213,7 +368,13 @@ function App() {
     } catch (err) {
       console.error(err);
       setMicPermissionGranted(false);
-      setError('Microphone access denied. Enable mic permissions and try again.');
+      let errorMsg = 'Microphone access denied. ';
+      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        errorMsg += 'This site requires HTTPS for microphone access. Please access via https:// or enable microphone permissions in your browser settings.';
+      } else {
+        errorMsg += 'Enable mic permissions in your browser settings and try again.';
+      }
+      setError(errorMsg);
       setIsConnecting(false);
       return;
     }
@@ -258,7 +419,7 @@ function App() {
 
       pc.onconnectionstatechange = () => {
         if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-          stopRealtime();
+          stopRealtimeWithAnalysis();
         }
       };
 
@@ -275,7 +436,7 @@ function App() {
       };
 
       dc.onclose = () => {
-        stopRealtime();
+        stopRealtimeWithAnalysis();
       };
 
       dc.onopen = () => {
@@ -287,22 +448,32 @@ function App() {
             modalities: ['audio', 'text'],
             input_audio_format: 'pcm16',
             output_audio_format: 'pcm16',
+            input_audio_transcription: {
+              model: 'whisper-1'
+            },
             temperature: temperature,
             max_response_output_tokens: maxTokens
           }
         };
         dc.send(JSON.stringify(sessionUpdate));
+        // Send first sentence only after button is clicked and connection is established
+        // This ensures AI speaks after user interaction, not before
         if (firstSentence) {
-          dc.send(
-            JSON.stringify({
-              type: 'response.create',
-              response: {
-                modalities: ['audio', 'text'],
-                instructions: `Say exactly the following sentence and nothing else: ${firstSentence}`,
-                conversation: 'none'
-              }
-            })
-          );
+          // Small delay to ensure session is fully ready
+          setTimeout(() => {
+            if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
+              dataChannelRef.current.send(
+                JSON.stringify({
+                  type: 'response.create',
+                  response: {
+                    modalities: ['audio', 'text'],
+                    instructions: `Say exactly the following sentence and nothing else: ${firstSentence}`,
+                    conversation: 'none'
+                  }
+                })
+              );
+            }
+          }, 500);
         }
       };
 
@@ -346,9 +517,9 @@ function App() {
     } catch (err) {
       console.error(err);
       setError(err.message ?? 'Unable to start realtime session.');
-      stopRealtime();
+      stopRealtimeWithAnalysis();
     }
-  }, [API_BASE_URL, handleRealtimeEvent, isConnected, isConnecting, stopRealtime]);
+  }, [API_BASE_URL, handleRealtimeEvent, isConnected, isConnecting, stopRealtimeWithAnalysis]);
 
   const handleStartConversation = async () => {
     if (isConnecting || isConnected) {
@@ -367,45 +538,21 @@ function App() {
       return;
     }
     if (isConnected) {
-      stopRealtime();
+      // Pass the current messages state directly
+      await stopRealtimeWithAnalysis(messages);
     } else {
+      // Starting a new conversation - clear previous analysis and messages
+      setAnalysis(null);
+      setMessages([]);
+      messagesRef.current = [];
       await startRealtime();
-    }
-  };
-
-  const handleAnalyze = async () => {
-    const userMessages = messagesRef.current.filter((m) => m.role === 'user');
-    if (userMessages.length === 0 || isAnalyzing || isConnecting) {
-      return;
-    }
-    setIsAnalyzing(true);
-    setError(null);
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: messagesRef.current })
-      });
-
-      if (!response.ok) {
-        throw new Error('Unable to analyze the conversation right now.');
-      }
-
-      const data = await response.json();
-      setAnalysis(data.analysis ?? null);
-    } catch (err) {
-      console.error(err);
-      setError(err.message ?? 'Something went wrong.');
-    } finally {
-      setIsAnalyzing(false);
     }
   };
 
   const statusMessage = error
     ? error
     : !micPermissionGranted
-      ? 'Microphone access is blocked. Update permissions and reconnect.'
+      ? 'Microphone access is blocked. This site requires HTTPS for microphone access. Please use https:// or enable microphone permissions in your browser settings.'
       : isConnecting
         ? 'Negotiating a secure audio link…'
         : isConnected
@@ -424,7 +571,7 @@ function App() {
             <h1>BakerMatcher Personality Analysis</h1>
             <p>
               Watch the featured video, share your thoughts, and let {ASSISTANT_NAME} surface how your
-              perspective shapes your financial mindset.
+              perspective shapes your mindset.
             </p>
           </div>
         </div>
@@ -454,9 +601,11 @@ function App() {
         {hasStarted && (
           <section className="chat-panel">
             <div className="chat-log" role="log" aria-live="polite">
-              {messages.map((msg, idx) => (
-                <Message key={`msg-${idx}`} role={msg.role} content={msg.content} />
-              ))}
+              {messages
+                .filter((msg) => msg.role === 'assistant')
+                .map((msg, idx) => (
+                  <Message key={`msg-${idx}`} role={msg.role} content={msg.content} />
+                ))}
               {liveAssistantText && (
                 <Message role="assistant" content={liveAssistantText} />
               )}
@@ -472,22 +621,16 @@ function App() {
                 {isConnected ? 'Stop conversation' : isConnecting ? 'Connecting…' : 'Tap to speak'}
               </button>
               <div className="mic-status">{statusMessage}</div>
-              <button
-                onClick={handleAnalyze}
-                disabled={isAnalyzing || isConnecting || !hasUserMessages}
-              >
-                {isAnalyzing ? 'Analyzing…' : 'Analyze my thoughts'}
-              </button>
             </div>
 
             {error && <div className="error-banner">{error}</div>}
-            <AnalysisCard analysis={analysis} />
+            <AnalysisDisplay analysis={analysis} isAnalyzing={isAnalyzing} />
           </section>
         )}
       </main>
 
       <footer className="footer">
-        {ASSISTANT_NAME} · Finance reflections powered by OpenAI
+        {ASSISTANT_NAME} · Personality reflections
       </footer>
     </div>
   );
