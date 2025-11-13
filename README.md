@@ -47,10 +47,23 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**Note**: On macOS, you may need to install PortAudio first:
-```bash
-brew install portaudio
-```
+**Note**: `pyaudio` is only needed for the standalone CLI script (`openai_realtime_agent.py`). The web application doesn't require it.
+
+**Installing PortAudio (required for pyaudio):**
+
+- **On macOS:**
+  ```bash
+  brew install portaudio
+  ```
+
+- **On Ubuntu/Debian:**
+  ```bash
+  sudo apt-get update
+  sudo apt-get install portaudio19-dev
+  ```
+
+- **On other Linux distributions:**
+  Install the PortAudio development package for your distribution.
 
 ### 2. Install Frontend Dependencies
 

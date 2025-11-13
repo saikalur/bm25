@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000';
+// Use relative URL if on same domain, otherwise use environment variable or default
+const getApiBaseUrl = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  // If accessed via HTTPS, use relative URL (nginx will proxy)
+  if (window.location.protocol === 'https:') {
+    return ''; // Relative URL - same domain
+  }
+  // For local development
+  return 'http://localhost:5000';
+};
+
+const API_BASE_URL = getApiBaseUrl();
 const VIDEO_URL = 'https://youtu.be/dyaG7zEtJ7U';
 const ASSISTANT_NAME = 'BakerMatcher';
 const DEFAULT_FIRST_SENTENCE = "Hi! I'm Baker Matcher, and I'm here to chat with you about the videos you've watched a few minutes ago. What did you watch today, or what's on your mind? Let us have an open interactive conversation. Speak whatever is on your mind and I will patiently listen and engage with you";
@@ -355,7 +368,13 @@ function App() {
     } catch (err) {
       console.error(err);
       setMicPermissionGranted(false);
-      setError('Microphone access denied. Enable mic permissions and try again.');
+      let errorMsg = 'Microphone access denied. ';
+      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        errorMsg += 'This site requires HTTPS for microphone access. Please access via https:// or enable microphone permissions in your browser settings.';
+      } else {
+        errorMsg += 'Enable mic permissions in your browser settings and try again.';
+      }
+      setError(errorMsg);
       setIsConnecting(false);
       return;
     }
@@ -533,7 +552,7 @@ function App() {
   const statusMessage = error
     ? error
     : !micPermissionGranted
-      ? 'Microphone access is blocked. Update permissions and reconnect.'
+      ? 'Microphone access is blocked. This site requires HTTPS for microphone access. Please use https:// or enable microphone permissions in your browser settings.'
       : isConnecting
         ? 'Negotiating a secure audio link…'
         : isConnected
