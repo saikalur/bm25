@@ -88,9 +88,13 @@ function App() {
     return VIDEO_URL;
   }, []);
 
-  const hasUserMessages =
-    messages.some((message) => message.role === 'user') ||
-    messagesRef.current.some((message) => message.role === 'user');
+  const hasUserMessages = useMemo(() => {
+    if (messages.some((message) => message.role === 'user')) {
+      return true;
+    }
+    messagesRef.current = messages;
+    return messagesRef.current.some((message) => message.role === 'user');
+  }, [messages]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -142,6 +146,15 @@ function App() {
       return;
     }
 
+    const extractText = (item) => {
+      if (!item || !Array.isArray(item.content)) return '';
+      return item.content
+        .filter((part) => part?.type === 'text')
+        .map((part) => part.text || '')
+        .join('')
+        .trim();
+    };
+
     switch (event.type) {
       case 'response.output_text.delta': {
         assistantBufferRef.current += event.delta || '';
@@ -177,12 +190,30 @@ function App() {
             if (part.type === 'output_text' && part.text) {
               textParts.push(part.text);
             }
+            if (part.type === 'text' && part.text) {
+               textParts.push(part.text);
+            }
           });
           const text = textParts.join('').trim();
           if (text) {
             setMessages((prev) => [...prev, { role: 'assistant', content: text }]);
             assistantBufferRef.current = '';
             setLiveAssistantText('');
+          }
+        }
+        break;
+      }
+      case 'conversation.item.created': {
+        const item = event.item;
+        if (item?.type === 'message') {
+          const text = extractText(item);
+          if (text) {
+            if (item.role === 'assistant') {
+              setMessages((prev) => [...prev, { role: 'assistant', content: text }]);
+            }
+            if (item.role === 'user') {
+              setMessages((prev) => [...prev, { role: 'user', content: text }]);
+            }
           }
         }
         break;
@@ -292,17 +323,24 @@ function App() {
           }
         };
         dc.send(JSON.stringify(sessionUpdate));
+        // Send first sentence only after button is clicked and connection is established
+        // This ensures AI speaks after user interaction, not before
         if (firstSentence) {
-          dc.send(
-            JSON.stringify({
-              type: 'response.create',
-              response: {
-                modalities: ['audio', 'text'],
-                instructions: `Say exactly the following sentence and nothing else: ${firstSentence}`,
-                conversation: 'none'
-              }
-            })
-          );
+          // Small delay to ensure session is fully ready
+          setTimeout(() => {
+            if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
+              dataChannelRef.current.send(
+                JSON.stringify({
+                  type: 'response.create',
+                  response: {
+                    modalities: ['audio', 'text'],
+                    instructions: `Say exactly the following sentence and nothing else: ${firstSentence}`,
+                    conversation: 'none'
+                  }
+                })
+              );
+            }
+          }, 500);
         }
       };
 
