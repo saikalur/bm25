@@ -98,6 +98,8 @@ The application consists of two components that need to run simultaneously:
 
 #### 1. Start the Backend Server
 
+**Option A: Run in foreground (for development/debugging)**
+
 In one terminal:
 
 ```bash
@@ -106,6 +108,33 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Start Flask server
 python vapi_controller.py
+```
+
+**Option B: Run in background (recommended for production)**
+
+Using the provided script:
+```bash
+./start_backend.sh
+```
+
+Or manually:
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Run in background with nohup
+nohup python3 vapi_controller.py > log/backend.log 2>&1 &
+```
+
+To stop the background server:
+```bash
+./stop_backend.sh
+```
+
+Or manually find and kill the process:
+```bash
+# Find process on port 5000
+lsof -ti:5000 | xargs kill
 ```
 
 The server will start on `http://localhost:5000`
