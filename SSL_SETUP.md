@@ -36,12 +36,12 @@ Add this configuration:
 ```nginx
 server {
     listen 80;
-    server_name milestone-tracking.cardinaltalent.ai;
+    server_name app.bakermatcher.com;
 
     # Frontend (Vite dev server)
     # Note: Check which port Vite is using (may be 5173, 5174, 5175, etc.)
     location / {
-        proxy_pass http://localhost:5173;
+        proxy_pass http://localhost:8801;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -64,7 +64,7 @@ server {
 
     # WebSocket support for Vite HMR
     location /ws {
-        proxy_pass http://localhost:5173;
+        proxy_pass http://localhost:8801;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
