@@ -37,7 +37,7 @@ function AnalysisDisplay({ analysis, isAnalyzing }) {
     const keyInsights = Array.isArray(analysis.keyInsights) ? analysis.keyInsights : [];
     const nextSteps = Array.isArray(analysis.nextSteps) ? analysis.nextSteps : [];
     
-    let text = '=== Finance Reflection ===\n\n';
+    let text = '=== Conversation Analysis ===\n\n';
     
     if (analysis.summary) {
       text += `Summary:\n${analysis.summary}\n\n`;
@@ -45,6 +45,30 @@ function AnalysisDisplay({ analysis, isAnalyzing }) {
     
     if (analysis.sentiment) {
       text += `Sentiment: ${analysis.sentiment}\n\n`;
+    }
+    
+    const personalityScore = analysis.personalityScore || {};
+    if (personalityScore && Object.keys(personalityScore).length > 0) {
+      text += `Personality Score:\n`;
+      if (personalityScore.overallScore !== undefined) {
+        text += `  Overall Score: ${personalityScore.overallScore}/100\n`;
+      }
+      if (personalityScore.openness !== undefined) {
+        text += `  Openness: ${personalityScore.openness}/100\n`;
+      }
+      if (personalityScore.conscientiousness !== undefined) {
+        text += `  Conscientiousness: ${personalityScore.conscientiousness}/100\n`;
+      }
+      if (personalityScore.extraversion !== undefined) {
+        text += `  Extraversion: ${personalityScore.extraversion}/100\n`;
+      }
+      if (personalityScore.agreeableness !== undefined) {
+        text += `  Agreeableness: ${personalityScore.agreeableness}/100\n`;
+      }
+      if (personalityScore.neuroticism !== undefined) {
+        text += `  Neuroticism: ${personalityScore.neuroticism}/100\n`;
+      }
+      text += '\n';
     }
     
     if (keyInsights.length > 0) {
@@ -380,9 +404,12 @@ function App() {
     }
 
     try {
+      // Default to finance_basics video, can be made configurable later
+      const videoId = 'finance_basics';
       const tokenResponse = await fetch(`${API_BASE_URL}/api/realtime-token`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_id: videoId })
       });
       if (!tokenResponse.ok) {
         throw new Error('Unable to obtain realtime session token.');

@@ -30,6 +30,7 @@ LOG_FILE = LOG_DIR / "call_logs.json"
 DEBUG_LOG = LOG_DIR / "vapi_debug.log"
 DB_FILE = LOG_DIR / "calls.db"
 PROMPT_CONFIG_FILE = Path("prompt_config.json")
+VIDEO_CONFIG_FILE = Path("video_config.json")
 REALTIME_MODEL = os.getenv("BM25_REALTIME_MODEL", "gpt-4o-realtime-preview-2024-10-01")
 TTS_MODEL = os.getenv("BM25_TTS_MODEL", "gpt-4o-mini-tts")
 TTS_VOICE = os.getenv("BM25_TTS_VOICE", "alloy")
@@ -60,16 +61,21 @@ _prompt_config: Dict[str, Any] = {}
 VIDEO_URL = "https://youtu.be/dyaG7zEtJ7U"
 VIDEO_CONVERSATION_PRIMER = (
     "You are BakerMatcher, an empathetic financial guide discussing insights from the video "
-    f"available here: {VIDEO_URL}. Encourage thoughtful reflection, focus on personal "
-    "finance takeaways, and ask clarifying questions before offering advice. Always "
-    "acknowledge when you rely on the viewer's interpretation rather than the video's "
-    "direct content. Keep responses concise, action-oriented, and supportive."
+    f"available here: {VIDEO_URL}. Encourage thoughtful reflection, focus on individuals "
+    "finance takeaways, and ask clarifying questions before offering advice. "
+    "You DO NOT elaborate or give your thoughts. Your role is to extract information "
+    "from the user. Always acknowledge when you rely on the viewer's interpretation "
+    "rather than the video's direct content. Keep responses concise, action-oriented, and supportive."
 )
 ANALYSIS_SYSTEM_PROMPT = (
-    "You analyze conversations about personal finance. Given a transcript, return a JSON "
+    "You analyze conversations and provide insights. Given a transcript, return a JSON "
     "object with keys: summary (string), sentiment (string: positive/neutral/concerned), "
-    "keyInsights (array of up to 4 short bullet strings), and nextSteps (array of up to 3 "
-    "actionable suggestions). Base insights solely on the transcript provided."
+    "keyInsights (array of up to 4 short bullet strings), nextSteps (array of up to 3 "
+    "actionable suggestions), and personalityScore (object with keys: openness (0-100), "
+    "conscientiousness (0-100), extraversion (0-100), agreeableness (0-100), neuroticism (0-100), "
+    "and overallScore (0-100)). Base insights solely on the transcript provided. "
+    "Personality scores should reflect the user's communication style, engagement level, "
+    "and responses during the conversation."
 )
 
 # Initialize database
@@ -179,6 +185,155 @@ def load_prompt_config() -> Dict[str, Any]:
         "max_tokens": max_tokens
     }
     return _prompt_config
+
+
+def load_video_config(video_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Load video configuration from video_config.json."""
+    if not VIDEO_CONFIG_FILE.exists():
+        logger.warning(f"Video config file not found: {VIDEO_CONFIG_FILE}")
+        return None
+
+    try:
+        with open(VIDEO_CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            videos = config.get("videos", [])
+
+            if video_id:
+                # Find specific video by ID
+                for video in videos:
+                    if video.get("id") == video_id:
+                        return video
+                logger.warning(f"Video ID '{video_id}' not found in config")
+                return None
+
+            # Return first video if no ID specified
+            return videos[0] if videos else None
+    except Exception as exc:
+        logger.error(f"Error loading video config: {exc}")
+        return None
+
+
+def build_topic_enforcement_instructions(video_config: Dict[str, Any], prompt_config: Dict[str, Any]) -> tuple:
+    """Build instructions that include topic enforcement and script guidance.
+    Returns: (first_sentence, instructions)"""
+    topic = video_config.get("topic", "")
+    script = video_config.get("script", [])
+    followup_questions = video_config.get("followup_questions", [])
+
+    # Build first sentence with topic
+    first_sentence = f"Hi! I'm Baker Matcher, and I'm here to chat with you about the video on {topic} that you've watched a few minutes ago. What are your thoughts about what was presented in the video? Let us have an open interactive conversation. Share your thoughts openly and I will patiently listen and engage with you"
+
+    topic_enforcement = prompt_config.get("topic_enforcement",
+        "If the user goes off-topic (e.g., talking about movies when the topic is Finance), "
+        "politely redirect them: 'I appreciate you sharing that, but let's stay focused on [TOPIC]. "
+        "How does that relate to [TOPIC]?' Be gentle and conversational, not rigid.")
+
+    # Topic enforcement
+    strict_topic_enforcement = f"""
+CRITICAL: TOPIC ENFORCEMENT - YOU MUST ENFORCE THIS STRICTLY
+
+The conversation topic is: {topic}. The ENTIRE conversation must stay on {topic}.
+
+If the user tries to talk about ANYTHING else (movies, Hollywood, sports, unrelated topics, etc.), you MUST immediately and firmly redirect them:
+
+EXAMPLES:
+- User: "Hollywood movies"
+  You: "I appreciate you sharing that, but we're here to discuss {topic}. Let's stay focused on {topic}. What are your thoughts on {topic}?"
+
+- User: "I want to talk about movies"
+  You: "That's interesting, but we're discussing {topic} today. Can you tell me more about your thoughts on {topic}?"
+
+- User mentions any unrelated topic
+  You: "I understand, but let's keep our conversation about {topic}. What's your perspective on {topic}?"
+
+DO NOT allow the conversation to drift to other topics. DO NOT discuss movies, Hollywood, or any unrelated topics. 
+Gently but FIRMLY redirect them back to {topic} immediately. This is non-negotiable.
+"""
+
+    # Build follow-up questions list as a clear numbered list
+    followup_list = "\n".join([f"QUESTION {i+1}: {q}" for i, q in enumerate(followup_questions)])
+    
+    script_guidance = (
+        "CRITICAL RULES:\n\n"
+        "1. DO NOT ELABORATE: After user speaks, give 1-2 word acknowledgment ('Interesting,' 'I see'), then ask next question. Keep responses under 15 words.\n\n"
+        "2. DO NOT EXPLAIN VIDEO: Your role is to EXTRACT information, not provide it.\n\n"
+        "3. CONVERSATION FLOW:\n\n"
+        "   STEP 1: After your first sentence, user shares thoughts. Give brief acknowledgment, then ask: 'Do you want to discuss something else in the video you watched?'\n\n"
+        "   STEP 2: If user says YES, let them share more, then ask 'Do you want to discuss something else in the video you watched?' again. Repeat until they say NO.\n\n"
+        "   STEP 3 - CRITICAL TRANSITION TO FOLLOW-UP QUESTIONS:\n"
+        "   - After asking 'Do you want to discuss something else in the video you watched?', watch for these responses:\n"
+        "     * Direct: 'no,' 'not really,' 'that's all,' 'I'm done,' 'nothing else'\n"
+        "     * Indirect: 'I don't have anything else to discuss,' 'I don't have much to talk about,' 'nothing more to say,' 'that's everything,' 'I think that's it'\n"
+        "     * Any response that indicates the user is finished discussing the video\n"
+        "   - WHEN YOU HEAR ANY OF THESE, you MUST IMMEDIATELY transition to asking follow-up questions\n"
+        "   - Do NOT ask 'Do you want to discuss something else' again\n"
+        "   - Do NOT wait, pause, or ask anything else\n"
+        "   - IMMEDIATELY say: 'That's an interesting point, but how about [read QUESTION 1 exactly as written below]?'\n"
+        "   - Read the question VERBATIM - do not rephrase it\n"
+        "   - After user answers, say: 'Interesting. That's an interesting point, but how about [read QUESTION 2 exactly as written]?'\n"
+        "   - Continue this pattern: read QUESTION 3, then QUESTION 4, then QUESTION 5, etc.\n"
+        "   - You MUST ask ALL {len(followup_questions)} questions in order\n"
+        "   - Read each question EXACTLY as it appears below - verbatim, word for word\n"
+        "   - After each answer, brief acknowledgment, then next question\n"
+        "   - Do NOT stop until all questions are asked\n"
+        "   - CRITICAL: If user says 'I don't have much to talk about' or similar, this means START asking follow-up questions NOW\n\n"
+        "4. RESPONSE EXAMPLES:\n"
+        "   - 'I see. Do you want to discuss something else in the video you watched?'\n"
+        "   - When user says 'no': 'That's an interesting point, but how about What does financial security mean to you personally?'\n"
+        "   - After answer: 'Interesting. That's an interesting point, but how about How do you typically make decisions about spending money?'\n\n"
+        "5. NEVER: Elaborate, explain, give opinions, go quiet, stop early, or skip follow-up questions\n\n"
+        "6. ALWAYS: Be proactive, ask next question immediately, read questions verbatim, continue through all questions"
+    ).replace('{topic}', topic)
+
+    instructions = f"""
+{script_guidance}
+
+{strict_topic_enforcement}
+
+FOLLOW-UP QUESTIONS - READ THESE VERBATIM AFTER USER SAYS 'NO' OR 'NOT REALLY':
+
+{followup_list}
+
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
+
+TRIGGER DETECTION - When user is done discussing the video, IMMEDIATELY start asking follow-up questions:
+- Direct: 'no,' 'not really,' 'that's all,' 'I'm done,' 'nothing else'
+- Indirect: 'I don't have anything else to discuss,' 'I don't have much to talk about,' 'nothing more to say,' 'that's everything,' 'I think that's it'
+- ANY response that indicates they're finished = START asking follow-up questions NOW
+
+IMMEDIATE ACTION REQUIRED:
+When you detect the trigger, you MUST:
+1. Say: 'That's an interesting point, but how about [read QUESTION 1 above exactly as written]?'
+2. Wait for answer
+3. Say: 'Interesting. That's an interesting point, but how about [read QUESTION 2 above exactly as written]?'
+4. Continue through ALL {len(followup_questions)} questions in order
+
+READ QUESTIONS VERBATIM - word for word, do not rephrase
+
+ASK IN ORDER: QUESTION 1 → QUESTION 2 → QUESTION 3 → QUESTION 4 → QUESTION 5 → QUESTION 6 → QUESTION 7 → QUESTION 8
+
+FORMAT: Always use 'That's an interesting point, but how about [question text]?' where [question text] is EXACTLY as written above
+
+AFTER EACH ANSWER: Brief acknowledgment ('Interesting,' 'I see'), then immediately next question
+
+DO NOT STOP: You MUST ask all {len(followup_questions)} questions - continue until all are asked
+
+EXAMPLE TRANSITIONS - COPY THIS EXACT BEHAVIOR:
+User: 'not really'
+You: 'That's an interesting point, but how about What does financial security mean to you personally?'
+
+User: 'I don't have much to talk about'
+You: 'That's an interesting point, but how about What does financial security mean to you personally?'
+
+User: 'I don't have anything else to discuss'
+You: 'That's an interesting point, but how about What does financial security mean to you personally?'
+
+[After user answers]
+You: 'Interesting. That's an interesting point, but how about How do you typically make decisions about spending money?'
+[Continue with remaining questions...]
+"""
+
+    return first_sentence, instructions
 
 
 def get_realtime_sessions() -> Optional[Any]:
@@ -664,7 +819,15 @@ def analyze_conversation():
                 'summary': raw_text or 'Unable to analyze the conversation at this time.',
                 'sentiment': 'unknown',
                 'keyInsights': [],
-                'nextSteps': []
+                'nextSteps': [],
+                'personalityScore': {
+                    'openness': 50,
+                    'conscientiousness': 50,
+                    'extraversion': 50,
+                    'agreeableness': 50,
+                    'neuroticism': 50,
+                    'overallScore': 50
+                }
             }
         return jsonify({'analysis': analysis_payload})
     except Exception as exc:
@@ -686,13 +849,30 @@ def create_realtime_token():
     request_data = request.get_json(silent=True) or {}
     requested_voice = (request_data.get('voice') or '').strip() or prompt_config.get("voice", TTS_VOICE)
     requested_model = (request_data.get('model') or '').strip() or REALTIME_MODEL
+    video_id = request_data.get('video_id')  # Get video_id from request
+
+    # Load video config if video_id is provided
+    video_config = None
+    instructions = prompt_config.get("combined_instructions", VIDEO_CONVERSATION_PRIMER)
+
+    video_first_sentence = None
+    if video_id:
+        video_config = load_video_config(video_id)
+        if video_config:
+            # Build enhanced instructions with topic enforcement and script guidance
+            video_first_sentence, topic_instructions = build_topic_enforcement_instructions(video_config, prompt_config)
+            # Put topic enforcement and follow-up question instructions FIRST for highest priority
+            # Then system prompt, then other instructions
+            instructions = f"{topic_instructions}\n\n{prompt_config.get('system_prompt', '')}\n\n{prompt_config.get('instructions', '')}"
+        else:
+            logger.warning(f"Video config not found for video_id: {video_id}, using default instructions")
 
     try:
         session = session_create(
             model=requested_model,
             voice=requested_voice,
             modalities=["audio", "text"],
-            instructions=prompt_config.get("combined_instructions", VIDEO_CONVERSATION_PRIMER),
+            instructions=instructions,
             input_audio_format="pcm16",
             output_audio_format="pcm16",
             input_audio_transcription={
@@ -712,19 +892,33 @@ def create_realtime_token():
             logger.error("Realtime session created without client_secret")
             return jsonify({'error': 'Unable to issue realtime token.'}), 500
 
-        return jsonify({
+        # Use video-specific first sentence if available, otherwise use default
+        first_sentence_to_use = video_first_sentence if video_first_sentence else prompt_config.get("first_sentence")
+
+        response_data = {
             'clientSecret': secret_value,
             'expiresAt': client_secret.get('expires_at'),
             'session': {
                 'id': session.get('id'),
                 'model': session.get('model', requested_model),
                 'voice': session.get('voice', requested_voice),
-                'instructions': prompt_config.get("combined_instructions", VIDEO_CONVERSATION_PRIMER),
-                'firstSentence': prompt_config.get("first_sentence"),
+                'instructions': instructions[:200] + '...' if len(instructions) > 200 else instructions,
+                'firstSentence': first_sentence_to_use,
                 'temperature': prompt_config.get("temperature"),
                 'maxTokens': prompt_config.get("max_tokens")
             }
-        })
+        }
+
+        # Include video config if available
+        if video_config:
+            response_data['video'] = {
+                'id': video_config.get('id'),
+                'title': video_config.get('title'),
+                'video_url': video_config.get('video_url'),
+                'topic': video_config.get('topic')
+            }
+
+        return jsonify(response_data)
     except Exception as exc:
         logger.error(f"Realtime token error: {exc}")
         return jsonify({'error': 'Unable to create realtime session token.'}), 500
